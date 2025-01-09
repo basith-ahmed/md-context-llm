@@ -1,3 +1,4 @@
+### example:
 ```
-python main-v3.py https://basithahmed.me -o output.md
+python main.py https://basithahmed.me -o output.md
 ```
