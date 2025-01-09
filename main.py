@@ -8,8 +8,8 @@ from datetime import datetime
 import os
 import html2text
 import unicodedata
-import json
 import time
+import json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -19,29 +19,20 @@ class MarkdownFormatter:
         self.domain = urlparse(url).netloc
         self.date = datetime.now().strftime("%Y-%m-%d")
         self.metadata = {"url": url, "domain": self.domain, "capture_date": self.date, "word_count": 0, "sections": []}
-        
-    def create_header(self, title, author=None, date_published=None):
-        header = f"---\ntitle: {title}\nurl: {self.url}\ndomain: {self.domain}\ncapture_date: {self.date}\n"
-        if author:
-            header += f"author: {author}\n"
-        if date_published:
-            header += f"date_published: {date_published}\n"
-        header += "---\n\n"
-        return header
 
-    def create_toc(self, content):
-        headers = re.findall(r'^(#{2,4})\s+(.+)$', content, re.MULTILINE)
-        if not headers:
-            return ""
-        toc = ["## Contents\n"]
-        for hashes, title in headers:
-            level = len(hashes) - 2
-            indent = "  " * level
-            link = re.sub(r'[^\w\s-]', '', title.lower())
-            link = re.sub(r'[\s]+', '-', link.strip())
-            toc.append(f"{indent}* [{title}](#{link})")
-            self.metadata["sections"].append({"level": level + 1, "title": title, "link": link})
-        return "\n".join(toc) + "\n\n---\n\n"
+    def create_header(self, title, author=None, date_published=None):
+        return f"""
+> Original URL: [{self.url}]({self.url})  
+> Author: {author}
+> Published on: {date_published}
+> Captured on: {self.date}  
+> Source: {self.domain}
+
+Title: {title}
+
+Page Contents:
+
+"""
 
     def format_markdown(self, content):
         content = unicodedata.normalize('NFKC', content)
@@ -67,28 +58,33 @@ class MarkdownFormatter:
         return len(re.findall(r'\w+', text_only))
 
 def clean_soup(soup, base_url):
-    for tag in ['script', 'style', 'noscript', 'iframe', 'svg', 'canvas', 'advertisement', 'header', 'footer', 'nav', 'aside', 'form']:
+    for tag in ['script', 'style', 'noscript', 'iframe', 'canvas', 'advertisement']:
         for element in soup.find_all(tag):
-            element.decompose()
+            if element: element.decompose()
 
-    for pattern in ['advertisement', 'social', 'comment', 'related', 'sidebar', 'footer', 'header', 'nav', 'menu', 'cookie', 'popup', 'newsletter', 'ad-', 'banner']:
+    for pattern in ['advertisement', 'cookie', 'popup', 'newsletter', 'ad-']:
         for element in soup.find_all(class_=re.compile(pattern, re.I)):
-            element.decompose()
+            if element: element.decompose()
 
     for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
-        comment.extract()
+        if comment: comment.extract()
 
     for tag in soup.find_all(['a', 'img']):
+        if not tag: continue
         attr = 'href' if tag.name == 'a' else 'src'
         if tag.has_attr(attr):
             tag[attr] = urljoin(base_url, tag[attr])
-
-    for img in soup.find_all('img'):
-        img['alt'] = img.get('alt', '').strip() or 'Image'
+            if tag.name == 'img':
+                alt_text = tag.get('alt', '').strip() or 'Image'
+                title = tag.get('title', '').strip()
+                tag.replace_with(f"![{alt_text}]({tag[attr]}){f' - {title}' if title else ''}")
 
     for tag in soup.find_all():
-        if not tag.get_text(strip=True) and tag.name not in ['img', 'br', 'hr']:
-            tag.decompose()
+        if not tag: continue
+        if not hasattr(tag, 'name'): continue
+        if tag.name not in ['img', 'br', 'hr', 'input', 'button']:
+            if not tag.get_text(strip=True) and hasattr(tag, 'decompose'):
+                tag.decompose()
 
     return soup
 
@@ -102,11 +98,23 @@ def extract_metadata(soup):
     if date:
         metadata['date_published'] = date.get('content')
     
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(script.string)
+            if isinstance(data, dict):
+                if 'author' in data and not metadata.get('author'):
+                    metadata['author'] = data['author'].get('name', '') if isinstance(data['author'], dict) else data['author']
+                if 'datePublished' in data and not metadata.get('date_published'):
+                    metadata['date_published'] = data['datePublished']
+        except:
+            continue
+    
     return metadata
 
 def extract_markdown(html_content, base_url):
     soup = BeautifulSoup(html_content, 'html.parser')
     metadata = extract_metadata(soup)
+    
     soup = clean_soup(soup, base_url)
     
     title = soup.title.string if soup.title else urlparse(base_url).path.split('/')[-1]
@@ -130,17 +138,17 @@ def extract_markdown(html_content, base_url):
 
     markdown = h.handle(str(soup))
     formatted_content = formatter.format_markdown(markdown)
-    header = formatter.create_header(title, author=metadata.get('author'), date_published=metadata.get('date_published'))
-    toc = formatter.create_toc(formatted_content)
     
-    final_content = header + toc + formatted_content
+    header = formatter.create_header(title, author=metadata.get('author'), date_published=metadata.get('date_published'))
+    
+    final_content = header + formatted_content
     formatter.metadata.update(metadata)
     formatter.metadata['word_count'] = formatter.count_words(formatted_content)
     formatter.metadata['title'] = title
     
-    return final_content, formatter.metadata
+    return final_content
 
-def save_to_file(content, metadata, file_path):
+def save_to_file(content, file_path):
     directory = os.path.dirname(file_path) if os.path.dirname(file_path) else '.'
     os.makedirs(directory, exist_ok=True)
     
@@ -148,10 +156,6 @@ def save_to_file(content, metadata, file_path):
     
     with open(file_path, 'w', encoding='utf-8-sig') as file:
         file.write(content)
-    
-    metadata_path = os.path.splitext(file_path)[0] + '_metadata.json'
-    with open(metadata_path, 'w', encoding='utf-8-sig') as file:
-        json.dump(metadata, file, indent=2, ensure_ascii=False)
 
 def fetch_webpage_content(url, max_retries=3, timeout=30):
     headers = {
@@ -207,14 +211,12 @@ def main():
 
     try:
         html_content = fetch_webpage_content(args.url)
-        markdown_content, metadata = extract_markdown(html_content, args.url)
+        markdown_content = extract_markdown(html_content, args.url)
         
         if args.o:
-            save_to_file(markdown_content, metadata, args.o)
+            save_to_file(markdown_content, args.o)
         else:
             print(markdown_content)
-            print("\nMetadata:")
-            print(json.dumps(metadata, indent=2))
             
     except Exception as e:
         logging.error(f"Error: {e}")
